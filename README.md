@@ -6,7 +6,7 @@ This is a free sample from a pack of 10 n8n AI workflows I sell. It's the comple
 
 ## Files
 - `email-smart-classify.json` — import into n8n (Workflows → Import from File)
-- Setup, testing, and troubleshooting: see the setup section in this README (use README-EN.md content from the freebie folder)
+- Setup, testing, and troubleshooting: see the sections below in this README
 
 ## Requirements
 n8n ≥ 1.52 · Gmail OAuth2 · OpenAI API key or any OpenAI-compatible local endpoint (Ollama works) · Postgres
