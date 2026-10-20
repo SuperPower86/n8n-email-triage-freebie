@@ -1,0 +1,548 @@
+{
+  "name": "04 邮件智能分类",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": 60,
+        "event": "messageReceived",
+        "options": {
+          "labelIds": [
+            "INBOX"
+          ],
+          "includeHeaders": true
+        }
+      },
+      "name": "Gmail 新邮件触发",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 2,
+      "position": [
+        -620,
+        80
+      ],
+      "id": "63252599-e5bc-43fa-8f9a-e2eac47ec9ba",
+      "credentials": {
+        "Gmail OAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 去掉引用与签名，只保留本次新内容，降低 token 与误判\nconst strip = (h) => String(h || '').replace(/<[^>]+>/g, '\\n')\n  .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/\\n{2,}/g, '\\n');\nconst cut = (t) => t.split(/On .* wrote:|在 .* 写道:|-{3,}原始邮件|Original Message/)[0];\nreturn $input.all().map((i) => {\n  const m = i.json;\n  const body = cut(strip(m.snippet || m.content || m.text)).trim().slice(0, 3000);\n  return { json: {\n    message_id: m.id || m.messageId, from: String(m.from || '').toLowerCase(),\n    subject: String(m.subject || '').slice(0, 200), body,\n    received_at: m.date || new Date().toISOString(),\n    thread_id: m.threadId || m.thread_id,\n  } };\n});"
+      },
+      "name": "正文清洗",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -420,
+        80
+      ],
+      "id": "f1c7dfed-7185-494b-8cca-631220df5009"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "gpt-4o-mini"
+        },
+        "jsonModeOutput": true,
+        "options": {
+          "temperature": 0,
+          "timeout": 90,
+          "maxRetries": 2
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "你是客服邮箱的分诊员。只输出 JSON。\ncategory 只能取：inquiry(询价/合作)、after_sales(售后/故障)、billing(账单/发票/合同)、spam(营销/机器人)、other。\n字段：category、priority(1-5，5 最紧急)、confidence(0-1)、summary(不超过30字中文)、\nextract{company,phone,deadline,amount,product}（缺失填 null）、suggested_reply(不超过60字，仅 inquiry 需要)。\n判断不清时选 other 并把 confidence 给低，不要猜。"
+            },
+            {
+              "role": "user",
+              "content": "主题：={{ $json.subject }}\n发件人：={{ $json.from }}\n正文：={{ $json.body }}"
+            }
+          ]
+        }
+      },
+      "name": "LLM 分类与信息抽取",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.2,
+      "position": [
+        -180,
+        80
+      ],
+      "id": "81aa1e66-3b3e-4cf4-b502-0c3c46f52613",
+      "credentials": {
+        "OpenAI API": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $item.json.message?.content ?? $item.json;\nlet p = typeof raw === 'string' ? JSON.parse(raw.replace(/```json|```/g, '')) : raw;\nconst allow = ['inquiry', 'after_sales', 'billing', 'spam', 'other'];\nconst cat = allow.includes(p.category) ? p.category : 'other';\nconst conf = Math.max(0, Math.min(1, Number(p.confidence) || 0));\nconst src = $('正文清洗').first().json;\nreturn [{ json: { ...src, category: cat, confidence: conf, low_conf: conf < 0.6,\n  priority: Math.max(1, Math.min(5, Number(p.priority) || 3)),\n  summary: String(p.summary || '').slice(0, 120), extract: JSON.stringify(p.extract || {}),\n  suggested_reply: String(p.suggested_reply || ''), classified_at: new Date().toISOString() } }];"
+      },
+      "name": "置信度兜底",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        60,
+        80
+      ],
+      "id": "3bcbb801-a09e-4180-aca6-15b814532a63"
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "email_classifications",
+        "columns": {
+          "__rl": true,
+          "mode": "define",
+          "value": [
+            {
+              "column": "message_id",
+              "value": "={{ $json.message_id }}"
+            },
+            {
+              "column": "sender",
+              "value": "={{ $json.from }}"
+            },
+            {
+              "column": "subject",
+              "value": "={{ $json.subject }}"
+            },
+            {
+              "column": "category",
+              "value": "={{ $json.category }}"
+            },
+            {
+              "column": "confidence",
+              "value": "={{ $json.confidence }}"
+            },
+            {
+              "column": "summary",
+              "value": "={{ $json.summary }}"
+            },
+            {
+              "column": "extract",
+              "value": "={{ $json.extract }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "邮件分类台账",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        300,
+        80
+      ],
+      "id": "7e12ada5-fa67-42cc-8787-fae961770ed2",
+      "credentials": {
+        "Postgres 邮箱台账": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Postgres 邮箱台账"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "renameOutput": true,
+              "outputKey": "询价",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "combinator": "AND",
+                "conditions": [
+                  {
+                    "name": "c1",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "inquiry"
+                  }
+                ]
+              }
+            },
+            {
+              "renameOutput": true,
+              "outputKey": "售后",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "combinator": "AND",
+                "conditions": [
+                  {
+                    "name": "c2",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "after_sales"
+                  }
+                ]
+              }
+            },
+            {
+              "renameOutput": true,
+              "outputKey": "账单",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "combinator": "AND",
+                "conditions": [
+                  {
+                    "name": "c3",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "billing"
+                  }
+                ]
+              }
+            },
+            {
+              "renameOutput": true,
+              "outputKey": "垃圾",
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "combinator": "AND",
+                "conditions": [
+                  {
+                    "name": "c4",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "spam"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "fallbackOutput": {
+          "displayName": "其他 · 待人工",
+          "schema": []
+        },
+        "options": {}
+      },
+      "name": "按类别分流",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        540,
+        80
+      ],
+      "id": "1b38d78f-707e-4adf-bb79-186d862591d6"
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.from }}",
+        "subject": "=Re: {{ $json.subject }}",
+        "message": "={{ $json.suggested_reply || '已收到您的咨询，顾问将在 1 个工作日内回复。' }}",
+        "options": {
+          "inReplyTo": "={{ $json.message_id }}"
+        }
+      },
+      "name": "询价 · 自动回复",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        800,
+        -220
+      ],
+      "id": "1b3b519e-2a87-46ef-89e8-c7d92d6e3e87",
+      "credentials": {
+        "Gmail OAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "schema": "public",
+        "table": "crm_leads",
+        "conflictColumn": "email",
+        "columns": {
+          "__rl": true,
+          "mode": "define",
+          "value": [
+            {
+              "column": "email",
+              "value": "={{ $json.from }}"
+            },
+            {
+              "column": "company",
+              "value": "={{ $json.extract }}"
+            },
+            {
+              "column": "grade",
+              "value": "'B'"
+            },
+            {
+              "column": "owner",
+              "value": "'email-inbound'"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "询价 · 建线索",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        1040,
+        -220
+      ],
+      "id": "8def6cd0-53fb-4f4c-bc50-da18f3724955",
+      "credentials": {
+        "Postgres CRM 库": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Postgres CRM 库"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://你的zendesk域名/api/v2/tickets.json",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ ticket: { subject: $json.subject, requester: { email: $json.from, name: $json.from }, comment: { body: $json.summary }, priority: ['low','normal','high','urgent'][$json.priority-1], tags: ['auto-triage'] } }) }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "zendeskTokenApiCredentialType",
+        "options": {}
+      },
+      "name": "售后 · 建工单",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        -20
+      ],
+      "id": "c525d0cc-8ad6-475c-ab56-4ea20481320a"
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "select": "channel",
+        "channel": "#finance-inbox",
+        "text": "🧾 账单邮件 {{ $json.from }}\n{{ $json.summary }}\n提取信息：{{ $json.extract }}",
+        "otherOptions": {}
+      },
+      "name": "账单 · 通知财务",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [
+        800,
+        160
+      ],
+      "id": "6f55029a-cfc5-43f2-ab0f-0accd255dc4b",
+      "credentials": {
+        "Slack API": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "messageId": "={{ $json.message_id }}",
+        "operation": "markRead",
+        "threadId": "",
+        "options": {
+          "markAsSpam": true
+        }
+      },
+      "name": "垃圾 · 归档",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        800,
+        340
+      ],
+      "id": "cdd932c4-57b7-4875-b377-ba016c741938",
+      "credentials": {
+        "Gmail OAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "messageId": "={{ $json.message_id }}",
+        "operation": "addLabel",
+        "messageIdLabel": "待人工分诊",
+        "options": {}
+      },
+      "name": "低置信度 · 待人工",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        800,
+        520
+      ],
+      "id": "cdd0ac03-ce12-4d5e-bcc3-e72f22238baf",
+      "credentials": {
+        "Gmail OAuth2": {
+          "id": "REPLACE_WITH_YOUR_CREDENTIAL_ID",
+          "name": "Gmail OAuth2"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Gmail 新邮件触发": {
+      "main": [
+        [
+          {
+            "node": "正文清洗",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "正文清洗": {
+      "main": [
+        [
+          {
+            "node": "LLM 分类与信息抽取",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM 分类与信息抽取": {
+      "main": [
+        [
+          {
+            "node": "置信度兜底",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "置信度兜底": {
+      "main": [
+        [
+          {
+            "node": "邮件分类台账",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "邮件分类台账": {
+      "main": [
+        [
+          {
+            "node": "按类别分流",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "按类别分流": {
+      "main": [
+        [
+          {
+            "node": "询价 · 自动回复",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "售后 · 建工单",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "账单 · 通知财务",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "垃圾 · 归档",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "低置信度 · 待人工",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "询价 · 自动回复": {
+      "main": [
+        [
+          {
+            "node": "询价 · 建线索",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "335b1462-b69d-494f-85f5-fd4fe2d417a4",
+  "id": "f73e9a77-9d5d-408a-9d8f-2b0c3cd0d225",
+  "meta": {
+    "instanceId": "00000000-0000-4000-8000-000000000000",
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}
